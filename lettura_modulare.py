@@ -15,8 +15,28 @@ import branca
 import folium
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
+import matplotlib
 import numpy as np
 from scipy import signal
+
+# Configura backend matplotlib per Windows
+try:
+    # Prova diversi backend in ordine di preferenza
+    backends_to_try = ['Qt5Agg', 'TkAgg', 'Agg']
+    for backend in backends_to_try:
+        try:
+            matplotlib.use(backend)
+            print(f"🖼️  Usando backend matplotlib: {backend}")
+            break
+        except ImportError:
+            continue
+    else:
+        # Se nessun backend interattivo funziona, usa Agg per salvare i grafici
+        matplotlib.use('Agg')
+        print("🖼️  Usando backend Agg - i grafici saranno salvati come immagini")
+except Exception as e:
+    print(f"⚠️  Problema con backend matplotlib: {e}")
+    matplotlib.use('Agg')
 
 # =====================================================================
 # CONFIGURAZIONE
@@ -24,6 +44,9 @@ from scipy import signal
 
 # Cartella contenente i file CSV da processare
 csv_directory = r"C:\Users\david\Desktop portatile\CSV_Python"
+
+# Cartella di output per i risultati
+output_base_directory = r"C:\Users\david\Desktop portatile\CSV_Python\output"
 
 # --- Righe da saltare ---
 SKIP_ROWS = set()  # set(range(1, 101)) se vuoi saltare righe
@@ -62,16 +85,17 @@ def process_single_csv(csv_path: str, data_by_device: dict, units_seen: dict) ->
     
     try:
         with open(csv_path, newline='', encoding='utf-8-sig') as f:
-            # Leggi e processa header
-            header_line = f.readline()
-            headers = parse_csv_line(header_line)
+            # Usa il reader CSV standard per gestire meglio le virgolette
+            csv_reader = csv.reader(f)
             
-            for row_idx, line in enumerate(f, start=1):
-                if not line.strip():
-                    continue
-                
-                # Parse riga
-                values = parse_csv_line(line)
+            # Leggi header
+            try:
+                headers = next(csv_reader)
+            except StopIteration:
+                print(f"   ⚠️ File vuoto: {csv_path}")
+                return 0
+            
+            for row_idx, values in enumerate(csv_reader, start=1):
                 if len(values) != len(headers):
                     continue
                 
@@ -225,33 +249,14 @@ def parse_SM(data_str: str) -> dict:
 # =====================================================================
 
 def parse_csv_line(line):
-    """Parse una riga CSV con formato strano (triple virgolette)"""
-    line = line.strip().strip('"')
-    # Split manuale gestendo le virgolette doppie
-    parts = []
-    current = ""
-    in_quotes = False
-    i = 0
-    while i < len(line):
-        if i < len(line) - 1 and line[i:i+2] == '""':
-            if in_quotes:
-                in_quotes = False
-                i += 2
-                continue
-            else:
-                in_quotes = True
-                i += 2
-                continue
-        elif line[i] == ',' and not in_quotes:
-            parts.append(current.strip())
-            current = ""
-            i += 1
-        else:
-            current += line[i]
-            i += 1
-    if current:
-        parts.append(current.strip())
-    return parts
+    """Parse una riga CSV usando il parser standard di Python"""
+    # Usa il parser CSV standard che gestisce meglio le virgolette
+    import io
+    reader = csv.reader([line])
+    try:
+        return next(reader)
+    except StopIteration:
+        return []
 
 # Struttura: data_by_device[device_type][device_name] = {'timestamps': [], 'gps': [], 'metrics': {}}
 data_by_device = defaultdict(lambda: defaultdict(lambda: {
@@ -358,142 +363,213 @@ def _get_device_display_name(device_name: str) -> str:
             return f"{base_name} ({file_part})"
     return device_name
 
+def create_output_directory(timestamp_str: str) -> str:
+    """Crea la directory di output con timestamp"""
+    output_dir = Path(output_base_directory) / f"analysis_{timestamp_str}"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Directory di output creata: {output_dir}")
+    return str(output_dir)
+
+def _save_figure(fig, filepath: str):
+    """Salva una figura come immagine PNG"""
+    try:
+        fig.savefig(filepath, dpi=300, bbox_inches='tight', facecolor='white')
+        print(f"   💾 Grafico salvato: {Path(filepath).name}")
+        return filepath
+    except Exception as e:
+        print(f"   ⚠️  Errore salvando {Path(filepath).name}: {e}")
+        return None
+
 # Colori per dispositivi multipli dello stesso tipo
 COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
+
+# Crea directory di output con timestamp
+timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+output_dir = create_output_directory(timestamp_str)
 
 # --- GRAFICI EM ---
 if 'EM' in data_by_device:
     print("   📈 Grafici Environmental Monitor...")
     
-    # Raccogli tutte le metriche EM
-    all_em_metrics = set()
+    # Crea un grafico separato per ogni dispositivo EM
     for device_name, device_data in data_by_device['EM'].items():
-        all_em_metrics.update(device_data['metric_order'])
-    all_em_metrics = sorted(all_em_metrics)
-    
-    if all_em_metrics:
-        # Griglia combinata
-        ncols = 2
-        nrows = math.ceil(len(all_em_metrics) / ncols)
-        fig, axs = plt.subplots(nrows, ncols, figsize=(14, max(6, nrows * 3)), sharex='all', squeeze=False)
-        fig.suptitle('Environmental Monitor - Tutte le metriche', fontsize=14, fontweight='bold')
+        display_name = _get_device_display_name(device_name)
+        metrics = device_data['metric_order']
         
-        for i, metric in enumerate(all_em_metrics):
+        if not metrics:
+            continue
+            
+        print(f"      📊 Generando grafico per: {display_name}")
+        
+        # Griglia per le metriche del dispositivo
+        ncols = 2
+        nrows = math.ceil(len(metrics) / ncols)
+        fig, axs = plt.subplots(nrows, ncols, figsize=(16, max(8, nrows * 4)), 
+                               sharex='all', squeeze=False)
+        fig.suptitle(f'Environmental Monitor - {display_name}', fontsize=16, fontweight='bold')
+        
+        for i, metric in enumerate(metrics):
             r, c = divmod(i, ncols)
             ax = axs[r, c]
             
-            # Plot overlay per ogni dispositivo
-            for color_idx, (device_name, device_data) in enumerate(data_by_device['EM'].items()):
-                if metric in device_data['series']:
-                    color = COLORS[color_idx % len(COLORS)]
-                    display_name = _get_device_display_name(device_name)
-                    ax.plot(device_data['timestamps_dt'], device_data['series'][metric], 
-                           label=display_name, color=color, linewidth=1.5, alpha=0.8)
+            # Plot del singolo dispositivo
+            ax.plot(device_data['timestamps_dt'], device_data['series'][metric], 
+                   color='#1f77b4', linewidth=2, alpha=0.8)
             
             unit = (units_seen.get(metric, '') or '').strip()
             ylabel = f"{metric} ({unit})" if unit else metric
-            ax.set_ylabel(ylabel)
-            ax.legend(loc='best', fontsize=8)
+            ax.set_ylabel(ylabel, fontweight='bold')
+            ax.set_title(metric, fontsize=12, pad=10)
             _format_time_axis(ax)
             ax.grid(True, alpha=0.3)
+            
+            # Aggiungi statistiche
+            values = np.array(device_data['series'][metric])
+            finite_values = values[np.isfinite(values)]
+            if len(finite_values) > 0:
+                mean_val = np.mean(finite_values)
+                std_val = np.std(finite_values)
+                ax.text(0.02, 0.98, f'μ={mean_val:.2f}\nσ={std_val:.2f}', 
+                       transform=ax.transAxes, verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8),
+                       fontsize=10)
         
         # Nascondi subplot in eccesso
-        for j in range(len(all_em_metrics), nrows * ncols):
+        for j in range(len(metrics), nrows * ncols):
             r, c = divmod(j, ncols)
             axs[r, c].set_visible(False)
         
         plt.tight_layout()
+        
+        # Salva il grafico del dispositivo
+        safe_name = device_name.replace('/', '_').replace(' ', '_')
+        filepath = Path(output_dir) / f"EM_{safe_name}.png"
+        _save_figure(fig, str(filepath))
+        plt.close(fig)
 
 # --- GRAFICI RM ---
 if 'RM' in data_by_device:
     print("   📈 Grafici Respiratory Monitor...")
     
-    # Crea griglia per Accel, Gyro, Mag
-    fig, axs = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-    fig.suptitle('Respiratory Monitor - Sensori IMU', fontsize=14, fontweight='bold')
-    
-    sensor_groups = [
-        (['Accel_X', 'Accel_Y', 'Accel_Z'], 'Accelerometer (g)', 0),
-        (['Gyro_X', 'Gyro_Y', 'Gyro_Z'], 'Gyroscope (°/s)', 1),
-        (['Mag_X', 'Mag_Y', 'Mag_Z'], 'Magnetometer (μT)', 2)
-    ]
-    
-    for metrics_group, ylabel, ax_idx in sensor_groups:
-        ax = axs[ax_idx]
+    # Crea un grafico separato per ogni dispositivo RM
+    for device_name, device_data in data_by_device['RM'].items():
+        display_name = _get_device_display_name(device_name)
         
-        for color_idx, (device_name, device_data) in enumerate(data_by_device['RM'].items()):
-            base_color = COLORS[color_idx % len(COLORS)]
-            display_name = _get_device_display_name(device_name)
+        print(f"      📊 Generando grafico per: {display_name}")
+        
+        # Crea griglia per Accel, Gyro, Mag + Magnitudine
+        fig, axs = plt.subplots(4, 1, figsize=(16, 12), sharex=True)
+        fig.suptitle(f'Respiratory Monitor - {display_name}', fontsize=16, fontweight='bold')
+        
+        sensor_groups = [
+            (['Accel_X', 'Accel_Y', 'Accel_Z'], 'Accelerometer (g)', 0, '#e74c3c'),
+            (['Gyro_X', 'Gyro_Y', 'Gyro_Z'], 'Gyroscope (°/s)', 1, '#3498db'),
+            (['Mag_X', 'Mag_Y', 'Mag_Z'], 'Magnetometer (μT)', 2, '#2ecc71'),
+            (['Accel_Magnitude'], 'Acceleration Magnitude (g)', 3, '#f39c12')
+        ]
+        
+        for metrics_group, ylabel, ax_idx, base_color in sensor_groups:
+            ax = axs[ax_idx]
             
-            # Plot X, Y, Z con varianti di colore
+            # Plot X, Y, Z con varianti di colore o magnitudine
             for axis_idx, metric in enumerate(metrics_group):
                 if metric in device_data['series']:
-                    alpha = 0.9 - axis_idx * 0.2
-                    linestyle = ['-', '--', ':'][axis_idx]
-                    label = f"{display_name} - {metric.split('_')[1]}"
-                    ax.plot(device_data['timestamps_dt'], device_data['series'][metric],
-                           label=label, color=base_color, linestyle=linestyle, 
-                           linewidth=1.5, alpha=alpha)
+                    if metric == 'Accel_Magnitude':
+                        # Magnitudine con colore pieno
+                        ax.plot(device_data['timestamps_dt'], device_data['series'][metric],
+                               label=metric, color=base_color, linewidth=2)
+                    else:
+                        # X, Y, Z con linestyle diversi
+                        alpha = 0.9 - axis_idx * 0.1
+                        linestyle = ['-', '--', ':'][axis_idx]
+                        axis_name = metric.split('_')[1]
+                        ax.plot(device_data['timestamps_dt'], device_data['series'][metric],
+                               label=f"{axis_name}", color=base_color, linestyle=linestyle, 
+                               linewidth=2, alpha=alpha)
+            
+            ax.set_ylabel(ylabel, fontweight='bold')
+            ax.set_title(ylabel.split('(')[0].strip(), fontsize=12, pad=10)
+            ax.legend(loc='best', fontsize=10)
+            ax.grid(True, alpha=0.3)
         
-        ax.set_ylabel(ylabel)
-        ax.legend(loc='best', fontsize=8, ncol=2)
-        ax.grid(True, alpha=0.3)
-    
-    _format_time_axis(axs[-1])
-    plt.tight_layout()
+        _format_time_axis(axs[-1])
+        plt.tight_layout()
+        
+        # Salva il grafico del dispositivo
+        safe_name = device_name.replace('/', '_').replace(' ', '_')
+        filepath = Path(output_dir) / f"RM_{safe_name}.png"
+        _save_figure(fig, str(filepath))
+        plt.close(fig)
 
 # --- GRAFICI SM ---
 if 'SM' in data_by_device:
     print("   📈 Grafici Stress Monitor...")
     
-    # Metriche principali: HR, HR-Conf, SCD
-    # Metriche sensori: Red, IR, Green
-    
-    fig, axs = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-    fig.suptitle('Stress Monitor', fontsize=14, fontweight='bold')
-    
-    # Subplot 1: HR e HR-Conf
-    ax1 = axs[0]
-    ax1_twin = ax1.twinx()
-    
-    for color_idx, (device_name, device_data) in enumerate(data_by_device['SM'].items()):
-        color = COLORS[color_idx % len(COLORS)]
+    # Crea un grafico separato per ogni dispositivo SM
+    for device_name, device_data in data_by_device['SM'].items():
         display_name = _get_device_display_name(device_name)
+        
+        print(f"      📊 Generando grafico per: {display_name}")
+        
+        # Crea griglia per HR/HR-Conf e PPG sensors
+        fig, axs = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
+        fig.suptitle(f'Stress Monitor - {display_name}', fontsize=16, fontweight='bold')
+        
+        # Subplot 1: HR e HR-Conf
+        ax1 = axs[0]
+        ax1_twin = ax1.twinx()
         
         if 'HR' in device_data['series']:
             ax1.plot(device_data['timestamps_dt'], device_data['series']['HR'],
-                    label=f"{display_name} - HR", color=color, linewidth=2)
+                    label="Heart Rate", color='#e74c3c', linewidth=3)
+            
+            # Statistiche HR
+            hr_values = np.array(device_data['series']['HR'])
+            finite_hr = hr_values[np.isfinite(hr_values)]
+            if len(finite_hr) > 0:
+                mean_hr = np.mean(finite_hr)
+                std_hr = np.std(finite_hr)
+                ax1.text(0.02, 0.98, f'HR: μ={mean_hr:.1f} bpm\nσ={std_hr:.1f} bpm', 
+                        transform=ax1.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.9),
+                        fontsize=11, fontweight='bold')
         
         if 'HR-Conf' in device_data['series']:
             ax1_twin.plot(device_data['timestamps_dt'], device_data['series']['HR-Conf'],
-                         label=f"{display_name} - HR-Conf", color=color, 
-                         linestyle='--', linewidth=1.5, alpha=0.6)
-    
-    ax1.set_ylabel('Heart Rate (bpm)', color='black', fontweight='bold')
-    ax1_twin.set_ylabel('HR Confidence (%)', color='gray')
-    ax1.legend(loc='upper left', fontsize=8)
-    ax1_twin.legend(loc='upper right', fontsize=8)
-    ax1.grid(True, alpha=0.3)
-    
-    # Subplot 2: Sensori PPG (Red, IR, Green)
-    ax2 = axs[1]
-    
-    for color_idx, (device_name, device_data) in enumerate(data_by_device['SM'].items()):
+                         label="HR Confidence", color='#3498db', 
+                         linestyle='--', linewidth=2, alpha=0.7)
+        
+        ax1.set_ylabel('Heart Rate (bpm)', color='#e74c3c', fontweight='bold', fontsize=12)
+        ax1_twin.set_ylabel('HR Confidence (%)', color='#3498db', fontweight='bold', fontsize=12)
+        ax1.set_title('Heart Rate Analysis', fontsize=14, pad=15)
+        ax1.legend(loc='upper left', fontsize=10)
+        ax1_twin.legend(loc='upper right', fontsize=10)
+        ax1.grid(True, alpha=0.3)
+        
+        # Subplot 2: Sensori PPG (Red, IR, Green)
+        ax2 = axs[1]
+        
         ppg_colors = {'Red': '#e74c3c', 'IR': '#34495e', 'Green': '#27ae60'}
-        display_name = _get_device_display_name(device_name)
         
         for ppg_name, ppg_color in ppg_colors.items():
             if ppg_name in device_data['series']:
                 ax2.plot(device_data['timestamps_dt'], device_data['series'][ppg_name],
-                        label=f"{display_name} - {ppg_name}", color=ppg_color, 
-                        linewidth=1.5, alpha=0.7)
-    
-    ax2.set_ylabel('PPG Sensors (arbitrary units)')
-    ax2.legend(loc='best', fontsize=8, ncol=3)
-    ax2.grid(True, alpha=0.3)
-    
-    _format_time_axis(ax2)
-    plt.tight_layout()
+                        label=f"{ppg_name} Channel", color=ppg_color, 
+                        linewidth=2, alpha=0.8)
+        
+        ax2.set_ylabel('PPG Sensors (ADC Counts)', fontweight='bold', fontsize=12)
+        ax2.set_title('Photoplethysmography (PPG) Sensors', fontsize=14, pad=15)
+        ax2.legend(loc='best', fontsize=10)
+        ax2.grid(True, alpha=0.3)
+        
+        _format_time_axis(ax2)
+        plt.tight_layout()
+        
+        # Salva il grafico del dispositivo
+        safe_name = device_name.replace('/', '_').replace(' ', '_')
+        filepath = Path(output_dir) / f"SM_{safe_name}.png"
+        _save_figure(fig, str(filepath))
+        plt.close(fig)
     
     # --- GRAFICO PULSE RATE WAVEFORM ---
     print("   📈 Estrazione forma d'onda Pulse Rate...")
@@ -585,6 +661,12 @@ if 'SM' in data_by_device:
                 _format_time_axis(ax)
             
             plt.tight_layout()
+            
+            # Salva il grafico della forma d'onda
+            device_clean = device_name.replace('/', '_').replace(' ', '_')
+            filepath = Path(output_dir) / f"PulseWaveform_{device_clean}.png"
+            _save_figure(fig_wave, str(filepath))
+            plt.close(fig_wave)
             
             print(f"      ✅ Forma d'onda estratta: {len(waveform)} campioni")
             
@@ -747,12 +829,11 @@ if all_gps:
     # Controllo layer
     folium.LayerControl(collapsed=False).add_to(m)
     
-    # Salva con timestamp per evitare sovrascritture
-    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    map_file = f'anthem_devices_map_{timestamp_str}.html'
-    m.save(map_file)
-    print(f"✅ Mappa salvata: {map_file}")
-    webbrowser.open(map_file, new=2)
+    # Salva nella directory di output
+    map_filepath = Path(output_dir) / 'interactive_devices_map.html'
+    m.save(str(map_filepath))
+    print(f"✅ Mappa salvata: {map_filepath}")
+    webbrowser.open(str(map_filepath), new=2)
 else:
     print("⚠️  Nessuna coordinata GPS trovata.")
 
@@ -766,4 +847,50 @@ if 'RM' in data_by_device:
     print(f"   - Respiratory Monitor: {len(data_by_device['RM'])} dispositivi")
 if 'SM' in data_by_device:
     print(f"   - Stress Monitor: {len(data_by_device['SM'])} dispositivi")
-plt.show()
+
+print(f"\n✅ Tutti i grafici e mappe sono stati salvati in: {output_dir}")
+
+# Lista tutti i file generati nella directory di output
+output_path = Path(output_dir)
+png_files = list(output_path.glob("*.png"))
+html_files = list(output_path.glob("*.html"))
+
+if png_files or html_files:
+    print("\n� File generati:")
+    
+    # Raggruppa per tipo di dispositivo
+    em_files = [f for f in png_files if f.name.startswith('EM_')]
+    rm_files = [f for f in png_files if f.name.startswith('RM_')]
+    sm_files = [f for f in png_files if f.name.startswith('SM_')]
+    pulse_files = [f for f in png_files if f.name.startswith('PulseWaveform_')]
+    
+    if em_files:
+        print(f"   🌍 Environmental Monitor ({len(em_files)} dispositivi):")
+        for f in sorted(em_files):
+            print(f"      - {f.name}")
+    
+    if rm_files:
+        print(f"   🫁 Respiratory Monitor ({len(rm_files)} dispositivi):")
+        for f in sorted(rm_files):
+            print(f"      - {f.name}")
+    
+    if sm_files:
+        print(f"   ❤️  Stress Monitor ({len(sm_files)} dispositivi):")
+        for f in sorted(sm_files):
+            print(f"      - {f.name}")
+    
+    if pulse_files:
+        print(f"   � Pulse Rate Waveforms ({len(pulse_files)} dispositivi):")
+        for f in sorted(pulse_files):
+            print(f"      - {f.name}")
+    
+    if html_files:
+        print(f"   🗺️  Mappe interattive:")
+        for f in sorted(html_files):
+            print(f"      - {f.name}")
+
+print(f"\n🚀 Apri la cartella: {output_dir}")
+print("💡 Per visualizzare i grafici, apri i file PNG")
+print("🌐 Per la mappa interattiva, apri il file HTML")
+
+plt.close('all')  # Chiude tutte le figure per liberare memoria
