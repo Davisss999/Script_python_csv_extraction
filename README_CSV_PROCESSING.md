@@ -4,6 +4,37 @@
 
 Lo script è stato reso **completamente modulare** e ora processa automaticamente tutti i file CSV presenti nella cartella specificata.
 
+## Dispositivi Supportati
+
+### 🌍 Environmental Monitor (EM)
+- **Formato**: `CO2: 1440ppm, CO: 24.61ppm, PM2.5: 8.5μg/m³, ...`
+- **Metriche**: 16 parametri ambientali
+- **Grafici**: Griglia 2x8 con statistiche per ogni metrica
+
+### 🫁 Respiratory Monitor (RM)  
+- **Formato**: `Accel: (x,y,z), Gyro: (x,y,z), Mag: (x,y,z)`
+- **Metriche**: Accelerometro, Giroscopio, Magnetometro + Magnitudine
+- **Grafici**: 4 subplot con sensori IMU
+
+### ❤️ Polar H10 (PH) - **NUOVO!**
+- **Formato**: `HR: 72bpm, Contact: N/A, RR: [776]ms`
+- **Metriche**: 
+  - **HR**: Heart Rate (frequenza cardiaca in bpm)
+  - **Contact**: Stato contatto sensore
+  - **RR**: Intervalli R-R in millisecondi (HRV)
+  - **RR_Mean**: Media intervalli multipli
+  - **RR_Count**: Numero di intervalli
+- **Grafici**: 
+  - Heart Rate con statistiche
+  - RR Intervals (HRV)
+  - Contact Status
+- **Analisi HRV**:
+  - SDNN (variabilità globale)
+  - RMSSD (variabilità a breve termine)
+  - pNN50 (percentuale differenze >50ms)
+  - Poincaré Plot
+  - Distribuzione RR intervals
+
 ## Come Usare lo Script
 
 ### 1. Preparazione
@@ -17,52 +48,56 @@ python lettura_modulare.py
 
 ### 3. Risultati
 Lo script genererà automaticamente:
-- **Grafici combinati** per ogni tipo di dispositivo (EM, RM, SM)
-- **Forme d'onda pulse rate** per dispositivi SM
-- **Mappa interattiva** con timestamp univoco
-- **Report di dispositivi** trovati per ogni file
+- **Grafici separati** per ogni dispositivo (EM, RM, PH)
+- **Analisi HRV** per dispositivi Polar H10
+- **Mappa interattiva** con layer per ogni dispositivo
+- **Report dettagliato** in cartella timestampata
 
-## Teoria della Forma d'onda Pulse Rate
+## Teoria dell'Analisi HRV (Heart Rate Variability)
 
-### Principio Fisico
-La **fotopletismografia (PPG)** rileva variazioni volumetriche del sangue nei tessuti:
+### Principio Fisiologico
+L'**HRV** misura la variazione temporale tra battiti cardiaci consecutivi. È un indicatore importante di:
+- Attività del sistema nervoso autonomo
+- Stress fisiologico e psicologico
+- Fitness cardiovascolare
+- Recupero dopo attività fisica
 
-1. **LED Verde** → Illumina la pelle
-2. **Fotodiodo** → Rileva luce riflessa
-3. **Variazioni** → Il sangue assorbe più luce verde durante la pulsazione
-4. **Segnale** → Variazioni periodiche nell'intensità luminosa
+### Metriche HRV Calcolate
 
-### Elaborazione del Segnale
-
-#### Fase 1: Rimozione DC
+#### 1. SDNN (Standard Deviation of NN intervals)
 ```python
-green_ac = green_clean - np.mean(green_clean)
+sdnn = np.std(rr_intervals)
 ```
-- **Scopo**: Elimina l'offset costante dei tessuti statici
-- **Risultato**: Mantiene solo le variazioni dinamiche
+- **Cosa misura**: Variabilità globale degli intervalli RR
+- **Interpretazione**: 
+  - SDNN elevato → Buona variabilità, sistema autonomo sano
+  - SDNN basso → Ridotta variabilità, possibile stress o affaticamento
 
-#### Fase 2: Filtro Passa-Banda (0.5-4 Hz)
+#### 2. RMSSD (Root Mean Square of Successive Differences)
 ```python
-b, a = signal.butter(3, [low, high], btype='band')
-waveform = signal.filtfilt(b, a, green_ac)
+rr_diffs = np.diff(rr_intervals)
+rmssd = np.sqrt(np.mean(rr_diffs ** 2))
 ```
-- **Frequenze**: 0.5-4 Hz = 30-240 bpm (range fisiologico)
-- **Scopo**: Elimina rumore ad alta frequenza e derive a bassa frequenza
-- **Metodo**: Filtro Butterworth bidirezionale (zero-phase)
+- **Cosa misura**: Variabilità a breve termine (parasimpatico)
+- **Interpretazione**:
+  - RMSSD alto → Buona attività parasimpatica, rilassamento
+  - RMSSD basso → Stress, attivazione simpatica
 
-#### Fase 3: Normalizzazione
+#### 3. pNN50 (percentage of successive NN intervals > 50ms)
 ```python
-waveform_norm = (waveform - waveform.min()) / (waveform.max() - waveform.min())
+nn50 = np.sum(np.abs(rr_diffs) > 50)
+pnn50 = (nn50 / len(rr_diffs)) * 100
 ```
-- **Scopo**: Standardizza l'ampiezza per confronti tra soggetti
-- **Range**: 0-1 normalizzato
+- **Cosa misura**: Percentuale di intervalli con differenza >50ms
+- **Interpretazione**:
+  - pNN50 alto (>20%) → Buona modulazione parasimpatica
+  - pNN50 basso (<5%) → Ridotta variabilità, possibile stress
 
-### Interpretazione della Forma d'onda
+### Visualizzazioni HRV
 
-1. **Picchi**: Corrispondono alla sistole (contrazione cardiaca)
-2. **Valli**: Corrispondono alla diastole (rilassamento cardiaco)
-3. **Frequenza**: Determina la frequenza cardiaca
-4. **Morfologia**: Indica qualità del segnale e perfusione tissutale
+1. **Time Series RR**: Mostra andamento intervalli RR nel tempo
+2. **Poincaré Plot**: Visualizza pattern HRV (RR[n] vs RR[n+1])
+3. **Istogramma**: Distribuzione degli intervalli RR
 
 ## Funzionalità Aggiuntive
 

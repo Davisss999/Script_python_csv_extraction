@@ -1,5 +1,5 @@
 # Script modulare per leggere e visualizzare dati da dispositivi Anthem
-# Supporta: Environmental Monitor (EM), Respiratory Monitor (RM), Stress Monitor (SM)
+# Supporta: Environmental Monitor (EM), Respiratory Monitor (RM), Polar H10 (PH)
 # Processamento automatico di tutti i file CSV nella cartella specificata
 
 import csv
@@ -130,8 +130,8 @@ def process_single_csv(csv_path: str, data_by_device: dict, units_seen: dict) ->
                     metrics_dict = parse_EM(data_str)
                 elif device_type == 'RM':
                     metrics_dict = parse_RM(data_str)
-                elif device_type == 'SM':
-                    metrics_dict = parse_SM(data_str)
+                elif device_type == 'PH':
+                    metrics_dict = parse_PH(data_str)
                 else:
                     print(f"⚠️  Device type sconosciuto: {device_type}")
                     continue
@@ -229,19 +229,43 @@ def parse_RM(data_str: str) -> dict:
     
     return metrics
 
-# --- Parser SM: "HR: 49.0bpm, HR-Conf: 100.0%, ..." ---
-PATTERN_SM = re.compile(r'([^:,]+?):\s*([-+]?\d*\.?\d+)\s*([a-zA-Z%]*)')
+# --- Parser PH: "HR: 72bpm, Contact: N/A, RR: [776]ms" ---
+PATTERN_PH_HR = re.compile(r'HR:\s*([-+]?\d*\.?\d+)bpm')
+PATTERN_PH_CONTACT = re.compile(r'Contact:\s*([^,]+)')
+PATTERN_PH_RR = re.compile(r'RR:\s*\[([^\]]+)\]ms')
 
-def parse_SM(data_str: str) -> dict:
-    """Parse Stress Monitor data"""
+def parse_PH(data_str: str) -> dict:
+    """Parse Polar H10 data"""
     metrics = {}
-    for name, num, unit in PATTERN_SM.findall(data_str):
-        name = name.strip()
+    
+    # Parse Heart Rate
+    hr_match = PATTERN_PH_HR.search(data_str)
+    if hr_match:
         try:
-            val = float(num)
-            metrics[name] = val
+            metrics['HR'] = float(hr_match.group(1))
         except ValueError:
-            continue
+            pass
+    
+    # Parse Contact Status
+    contact_match = PATTERN_PH_CONTACT.search(data_str)
+    if contact_match:
+        contact_status = contact_match.group(1).strip()
+        # Converti N/A in 0, altri valori in 1
+        metrics['Contact'] = 0.0 if contact_status == 'N/A' else 1.0
+    
+    # Parse RR Intervals
+    rr_match = PATTERN_PH_RR.search(data_str)
+    if rr_match:
+        rr_values_str = rr_match.group(1)
+        rr_values = [float(v.strip()) for v in rr_values_str.split(',')]
+        
+        if rr_values:
+            # Salva il primo valore RR e la media se ce ne sono multipli
+            metrics['RR'] = rr_values[0]
+            if len(rr_values) > 1:
+                metrics['RR_Mean'] = sum(rr_values) / len(rr_values)
+                metrics['RR_Count'] = float(len(rr_values))
+    
     return metrics
 
 # =====================================================================
@@ -457,15 +481,14 @@ if 'RM' in data_by_device:
         
         print(f"      📊 Generando grafico per: {display_name}")
         
-        # Crea griglia per Accel, Gyro, Mag + Magnitudine
-        fig, axs = plt.subplots(4, 1, figsize=(16, 12), sharex=True)
+        # Crea griglia per Accel, Gyro, Mag (senza Magnitudine)
+        fig, axs = plt.subplots(3, 1, figsize=(16, 10), sharex=True)
         fig.suptitle(f'Respiratory Monitor - {display_name}', fontsize=16, fontweight='bold')
         
         sensor_groups = [
             (['Accel_X', 'Accel_Y', 'Accel_Z'], 'Accelerometer (g)', 0, '#e74c3c'),
             (['Gyro_X', 'Gyro_Y', 'Gyro_Z'], 'Gyroscope (°/s)', 1, '#3498db'),
-            (['Mag_X', 'Mag_Y', 'Mag_Z'], 'Magnetometer (μT)', 2, '#2ecc71'),
-            (['Accel_Magnitude'], 'Acceleration Magnitude (g)', 3, '#f39c12')
+            (['Mag_X', 'Mag_Y', 'Mag_Z'], 'Magnetometer (μT)', 2, '#2ecc71')
         ]
         
         for metrics_group, ylabel, ax_idx, base_color in sensor_groups:
@@ -501,27 +524,34 @@ if 'RM' in data_by_device:
         _save_figure(fig, str(filepath))
         plt.close(fig)
 
-# --- GRAFICI SM ---
-if 'SM' in data_by_device:
-    print("   📈 Grafici Stress Monitor...")
+# --- GRAFICI PH ---
+if 'PH' in data_by_device:
+    print("   📈 Grafici Polar H10...")
     
-    # Crea un grafico separato per ogni dispositivo SM
-    for device_name, device_data in data_by_device['SM'].items():
+    # Crea un grafico separato per ogni dispositivo PH
+    for device_name, device_data in data_by_device['PH'].items():
         display_name = _get_device_display_name(device_name)
         
         print(f"      📊 Generando grafico per: {display_name}")
         
-        # Crea griglia per HR/HR-Conf e PPG sensors
-        fig, axs = plt.subplots(2, 1, figsize=(16, 10), sharex=True)
-        fig.suptitle(f'Stress Monitor - {display_name}', fontsize=16, fontweight='bold')
+        # Determina quanti subplot servono basandosi sulle metriche disponibili
+        has_rr = 'RR' in device_data['series']
+        n_subplots = 1 + (1 if has_rr else 0)
         
-        # Subplot 1: HR e HR-Conf
-        ax1 = axs[0]
-        ax1_twin = ax1.twinx()
+        # Crea griglia per HR e RR intervals (senza Contact)
+        fig, axs = plt.subplots(n_subplots, 1, figsize=(16, 5 * n_subplots), sharex=True)
+        if n_subplots == 1:
+            axs = [axs]  # Converti in lista per uniformità
+        fig.suptitle(f'Polar H10 - {display_name}', fontsize=16, fontweight='bold')
         
+        subplot_idx = 0
+        
+        # Subplot 1: Heart Rate
         if 'HR' in device_data['series']:
-            ax1.plot(device_data['timestamps_dt'], device_data['series']['HR'],
-                    label="Heart Rate", color='#e74c3c', linewidth=3)
+            ax = axs[subplot_idx]
+            ax.plot(device_data['timestamps_dt'], device_data['series']['HR'],
+                    label="Heart Rate", color='#e74c3c', linewidth=2.5, marker='o', 
+                    markersize=3, alpha=0.8)
             
             # Statistiche HR
             hr_values = np.array(device_data['series']['HR'])
@@ -529,149 +559,65 @@ if 'SM' in data_by_device:
             if len(finite_hr) > 0:
                 mean_hr = np.mean(finite_hr)
                 std_hr = np.std(finite_hr)
-                ax1.text(0.02, 0.98, f'HR: μ={mean_hr:.1f} bpm\nσ={std_hr:.1f} bpm', 
-                        transform=ax1.transAxes, verticalalignment='top',
-                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.9),
+                min_hr = np.min(finite_hr)
+                max_hr = np.max(finite_hr)
+                
+                # Box con statistiche
+                stats_text = f'HR Statistics:\nμ = {mean_hr:.1f} bpm\nσ = {std_hr:.1f} bpm\nMin = {min_hr:.0f} bpm\nMax = {max_hr:.0f} bpm'
+                ax.text(0.02, 0.98, stats_text, 
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#e74c3c', linewidth=2),
                         fontsize=11, fontweight='bold')
+                
+                # Linee di riferimento
+                ax.axhline(y=mean_hr, color='#e74c3c', linestyle='--', linewidth=1.5, alpha=0.5, label=f'Mean: {mean_hr:.1f} bpm')
+            
+            ax.set_ylabel('Heart Rate (bpm)', color='#e74c3c', fontweight='bold', fontsize=13)
+            ax.set_title('Heart Rate Monitoring', fontsize=14, pad=15, fontweight='bold')
+            ax.legend(loc='upper right', fontsize=10)
+            ax.grid(True, alpha=0.3, linestyle='--')
+            subplot_idx += 1
         
-        if 'HR-Conf' in device_data['series']:
-            ax1_twin.plot(device_data['timestamps_dt'], device_data['series']['HR-Conf'],
-                         label="HR Confidence", color='#3498db', 
-                         linestyle='--', linewidth=2, alpha=0.7)
+        # Subplot 2: RR Intervals
+        if has_rr:
+            ax = axs[subplot_idx]
+            ax.plot(device_data['timestamps_dt'], device_data['series']['RR'],
+                    label="RR Interval", color='#3498db', linewidth=2, marker='s', 
+                    markersize=3, alpha=0.8)
+            
+            # Se disponibile, mostra anche RR_Mean
+            if 'RR_Mean' in device_data['series']:
+                ax.plot(device_data['timestamps_dt'], device_data['series']['RR_Mean'],
+                       label="RR Mean (multiple)", color='#9b59b6', linewidth=2, 
+                       linestyle='--', alpha=0.7)
+            
+            # Statistiche RR
+            rr_values = np.array(device_data['series']['RR'])
+            finite_rr = rr_values[np.isfinite(rr_values)]
+            if len(finite_rr) > 0:
+                mean_rr = np.mean(finite_rr)
+                std_rr = np.std(finite_rr)
+                
+                stats_text = f'RR Statistics:\nμ = {mean_rr:.1f} ms\nσ = {std_rr:.1f} ms'
+                ax.text(0.02, 0.98, stats_text, 
+                        transform=ax.transAxes, verticalalignment='top',
+                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.9, edgecolor='#3498db', linewidth=2),
+                        fontsize=11, fontweight='bold')
+            
+            ax.set_ylabel('RR Interval (ms)', color='#3498db', fontweight='bold', fontsize=13)
+            ax.set_title('RR Interval Variability (HRV)', fontsize=14, pad=15, fontweight='bold')
+            ax.legend(loc='upper right', fontsize=10)
+            ax.grid(True, alpha=0.3, linestyle='--')
+            subplot_idx += 1
         
-        ax1.set_ylabel('Heart Rate (bpm)', color='#e74c3c', fontweight='bold', fontsize=12)
-        ax1_twin.set_ylabel('HR Confidence (%)', color='#3498db', fontweight='bold', fontsize=12)
-        ax1.set_title('Heart Rate Analysis', fontsize=14, pad=15)
-        ax1.legend(loc='upper left', fontsize=10)
-        ax1_twin.legend(loc='upper right', fontsize=10)
-        ax1.grid(True, alpha=0.3)
-        
-        # Subplot 2: Sensori PPG (Red, IR, Green)
-        ax2 = axs[1]
-        
-        ppg_colors = {'Red': '#e74c3c', 'IR': '#34495e', 'Green': '#27ae60'}
-        
-        for ppg_name, ppg_color in ppg_colors.items():
-            if ppg_name in device_data['series']:
-                ax2.plot(device_data['timestamps_dt'], device_data['series'][ppg_name],
-                        label=f"{ppg_name} Channel", color=ppg_color, 
-                        linewidth=2, alpha=0.8)
-        
-        ax2.set_ylabel('PPG Sensors (ADC Counts)', fontweight='bold', fontsize=12)
-        ax2.set_title('Photoplethysmography (PPG) Sensors', fontsize=14, pad=15)
-        ax2.legend(loc='best', fontsize=10)
-        ax2.grid(True, alpha=0.3)
-        
-        _format_time_axis(ax2)
+        _format_time_axis(axs[-1])
         plt.tight_layout()
         
         # Salva il grafico del dispositivo
         safe_name = device_name.replace('/', '_').replace(' ', '_')
-        filepath = Path(output_dir) / f"SM_{safe_name}.png"
+        filepath = Path(output_dir) / f"PH_{safe_name}.png"
         _save_figure(fig, str(filepath))
         plt.close(fig)
-    
-    # --- GRAFICO PULSE RATE WAVEFORM ---
-    print("   📈 Estrazione forma d'onda Pulse Rate...")
-    
-    for device_name, device_data in data_by_device['SM'].items():
-        if 'Green' not in device_data['series']:
-            continue
-        
-        display_name = _get_device_display_name(device_name)
-        print(f"   📈 Processando forma d'onda per: {display_name}")
-        
-        # Estrai dati Green channel
-        green_data = np.array(device_data['series']['Green'], dtype=float)
-        timestamps_dt = device_data['timestamps_dt']
-        
-        # Rimuovi NaN
-        valid_mask = np.isfinite(green_data)
-        green_clean = green_data[valid_mask]
-        timestamps_clean = [timestamps_dt[i] for i, v in enumerate(valid_mask) if v]
-        
-        if len(green_clean) < 10:
-            print(f"   ⚠️  Dati insufficienti per {device_name}")
-            continue
-        
-        # Calcola frequenza di campionamento media
-        if len(timestamps_clean) > 1:
-            time_diffs = [(timestamps_clean[i+1] - timestamps_clean[i]).total_seconds() 
-                         for i in range(len(timestamps_clean)-1) if i < len(timestamps_clean)-1]
-            avg_sample_interval = np.mean(time_diffs)
-            fs = 1.0 / avg_sample_interval if avg_sample_interval > 0 else 1.0
-        else:
-            fs = 1.0
-        
-        print(f"      Freq. campionamento: {fs:.2f} Hz")
-        
-        # 1. Rimuovi componente DC
-        green_ac = green_clean - np.mean(green_clean)
-        
-        # 2. Filtro passa-banda (0.5-4 Hz = 30-240 bpm)
-        nyquist = fs / 2
-        low = 0.5 / nyquist
-        high = 4.0 / nyquist
-        
-        # Limita i valori tra 0 e 1 (requisito del filtro butter)
-        if low >= 1:
-            low = 0.95
-        if high >= 1:
-            high = 0.95
-        if low <= 0:
-            low = 0.05
-        
-        try:
-            b, a = signal.butter(3, [low, high], btype='band')
-            waveform = signal.filtfilt(b, a, green_ac)
-            
-            # 3. Normalizza
-            if waveform.max() != waveform.min():
-                waveform_norm = (waveform - waveform.min()) / (waveform.max() - waveform.min())
-            else:
-                waveform_norm = waveform
-            
-            # Crea figura per la forma d'onda
-            fig_wave, axs_wave = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-            fig_wave.suptitle(f'Pulse Rate Waveform - {display_name}', fontsize=14, fontweight='bold')
-            
-            # Subplot 1: Segnale grezzo
-            axs_wave[0].plot(timestamps_clean, green_clean, alpha=0.7, color='#27ae60', linewidth=1)
-            axs_wave[0].set_ylabel('Green Channel\n(ADC Counts)', fontweight='bold')
-            axs_wave[0].set_title('Segnale PPG Grezzo')
-            axs_wave[0].grid(True, alpha=0.3)
-            
-            # Subplot 2: Segnale AC (DC removed)
-            axs_wave[1].plot(timestamps_clean, green_ac, alpha=0.8, color='#3498db', linewidth=1)
-            axs_wave[1].set_ylabel('Ampiezza AC', fontweight='bold')
-            axs_wave[1].set_title('Segnale AC (DC Removed)')
-            axs_wave[1].grid(True, alpha=0.3)
-            axs_wave[1].axhline(y=0, color='k', linestyle='--', linewidth=0.5, alpha=0.5)
-            
-            # Subplot 3: Forma d'onda filtrata
-            axs_wave[2].plot(timestamps_clean, waveform_norm, color='#e74c3c', linewidth=1.5)
-            axs_wave[2].set_ylabel('Ampiezza\nNormalizzata', fontweight='bold')
-            axs_wave[2].set_title(f'Forma d\'onda Pulse Rate Filtrata (0.5-4 Hz)')
-            axs_wave[2].set_xlabel('Timestamp')
-            axs_wave[2].grid(True, alpha=0.3)
-            axs_wave[2].fill_between(timestamps_clean, 0, waveform_norm, alpha=0.3, color='#e74c3c')
-            
-            # Formatta assi temporali
-            for ax in axs_wave:
-                _format_time_axis(ax)
-            
-            plt.tight_layout()
-            
-            # Salva il grafico della forma d'onda
-            device_clean = device_name.replace('/', '_').replace(' ', '_')
-            filepath = Path(output_dir) / f"PulseWaveform_{device_clean}.png"
-            _save_figure(fig_wave, str(filepath))
-            plt.close(fig_wave)
-            
-            print(f"      ✅ Forma d'onda estratta: {len(waveform)} campioni")
-            
-        except Exception as e:
-            print(f"      ⚠️  Errore durante il filtraggio: {e}")
 
 # =====================================================================
 # MAPPA INTERATTIVA CON LAYER MULTIPLI
@@ -738,20 +684,20 @@ if all_gps:
                     tooltip=f"CO2: {v_mid:.1f} {unit_lbl}"
                 ).add_to(grp)
     
-    # --- Layer RM: Gradiente Magnitudine Movimento ---
+    # --- Layer RM: Gradiente Accelerazione Asse X ---
     if 'RM' in data_by_device:
         for device_name, device_data in data_by_device['RM'].items():
-            if 'Accel_Magnitude' not in device_data['series']:
+            if 'Accel_X' not in device_data['series']:
                 continue
             
             display_name = _get_device_display_name(device_name)
-            grp = folium.FeatureGroup(name=f"RM - Movement ({display_name})").add_to(m)
+            grp = folium.FeatureGroup(name=f"RM - Accel X ({display_name})").add_to(m)
             
-            mag_vals = np.array(device_data['series']['Accel_Magnitude'], dtype=float)
+            accel_vals = np.array(device_data['series']['Accel_X'], dtype=float)
             gps_coords = device_data['gps_coords']
             
             # Limiti colore
-            finite = mag_vals[np.isfinite(mag_vals)]
+            finite = accel_vals[np.isfinite(accel_vals)]
             if finite.size >= 2:
                 vmin = float(np.nanpercentile(finite, 5))
                 vmax = float(np.nanpercentile(finite, 95))
@@ -766,12 +712,12 @@ if all_gps:
                 colors=["#00FF00", "#7FFF00", "#FFFF00", "#FFD700", "#FFA500"],
                 vmin=vmin, vmax=vmax
             )
-            colormap.caption = f"Movement Magnitude (g) - {display_name}"
+            colormap.caption = f"Accel X (g) - {display_name}"
             colormap.add_to(m)
             
             # Segmenti colorati
             for i in range(1, len(gps_coords)):
-                v0, v1 = mag_vals[i-1], mag_vals[i]
+                v0, v1 = accel_vals[i-1], accel_vals[i]
                 if not (np.isfinite(v0) and np.isfinite(v1)):
                     continue
                 v_mid = (v0 + v1) / 2.0
@@ -779,17 +725,17 @@ if all_gps:
                 folium.PolyLine(
                     [gps_coords[i-1], gps_coords[i]],
                     color=color, weight=7, opacity=0.8,
-                    tooltip=f"Movement: {v_mid:.2f} g"
+                    tooltip=f"Accel X: {v_mid:.2f} g"
                 ).add_to(grp)
     
-    # --- Layer SM: Gradiente Heart Rate ---
-    if 'SM' in data_by_device:
-        for device_name, device_data in data_by_device['SM'].items():
+    # --- Layer PH: Gradiente Heart Rate ---
+    if 'PH' in data_by_device:
+        for device_name, device_data in data_by_device['PH'].items():
             if 'HR' not in device_data['series']:
                 continue
             
             display_name = _get_device_display_name(device_name)
-            grp = folium.FeatureGroup(name=f"SM - Heart Rate ({display_name})").add_to(m)
+            grp = folium.FeatureGroup(name=f"PH - Heart Rate ({display_name})").add_to(m)
             
             hr_vals = np.array(device_data['series']['HR'], dtype=float)
             gps_coords = device_data['gps_coords']
@@ -845,8 +791,8 @@ if 'EM' in data_by_device:
     print(f"   - Environmental Monitor: {len(data_by_device['EM'])} dispositivi")
 if 'RM' in data_by_device:
     print(f"   - Respiratory Monitor: {len(data_by_device['RM'])} dispositivi")
-if 'SM' in data_by_device:
-    print(f"   - Stress Monitor: {len(data_by_device['SM'])} dispositivi")
+if 'PH' in data_by_device:
+    print(f"   - Polar H10: {len(data_by_device['PH'])} dispositivi")
 
 print(f"\n✅ Tutti i grafici e mappe sono stati salvati in: {output_dir}")
 
@@ -861,8 +807,7 @@ if png_files or html_files:
     # Raggruppa per tipo di dispositivo
     em_files = [f for f in png_files if f.name.startswith('EM_')]
     rm_files = [f for f in png_files if f.name.startswith('RM_')]
-    sm_files = [f for f in png_files if f.name.startswith('SM_')]
-    pulse_files = [f for f in png_files if f.name.startswith('PulseWaveform_')]
+    sm_files = [f for f in png_files if f.name.startswith('PH_')]
     
     if em_files:
         print(f"   🌍 Environmental Monitor ({len(em_files)} dispositivi):")
@@ -875,13 +820,8 @@ if png_files or html_files:
             print(f"      - {f.name}")
     
     if sm_files:
-        print(f"   ❤️  Stress Monitor ({len(sm_files)} dispositivi):")
+        print(f"   ❤️  Polar H10 ({len(sm_files)} dispositivi):")
         for f in sorted(sm_files):
-            print(f"      - {f.name}")
-    
-    if pulse_files:
-        print(f"   � Pulse Rate Waveforms ({len(pulse_files)} dispositivi):")
-        for f in sorted(pulse_files):
             print(f"      - {f.name}")
     
     if html_files:
